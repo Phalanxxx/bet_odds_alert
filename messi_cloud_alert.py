@@ -77,7 +77,8 @@ def _alert_texts(kind, prob, threshold):
 def send_email_resend(kind, prob, threshold):
     api_key = os.environ.get("RESEND_API_KEY")
     to_addr = os.environ.get("ALERT_EMAIL_TO", "")
-    from_addr = os.environ.get("ALERT_EMAIL_FROM", "Polymarket Alert <onboarding@resend.dev>")
+    # dùng `or` để secret bị bỏ trống (biến = "") vẫn rơi về mặc định
+    from_addr = os.environ.get("ALERT_EMAIL_FROM") or "Polymarket Alert <onboarding@resend.dev>"
 
     subject, lead = _alert_texts(kind, prob, threshold)
     html = f"""
