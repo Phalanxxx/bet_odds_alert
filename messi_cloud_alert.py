@@ -113,7 +113,14 @@ def send_email_resend(kind, prob, threshold):
         RESEND_ENDPOINT,
         data=payload,
         method="POST",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            # BẮT BUỘC: thiếu UA -> Cloudflare trước Resend chặn với lỗi 403 code 1010
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/120.0.0.0 Safari/537.36",
+        },
     )
     try:
         with urlopen(req, timeout=20) as r:
