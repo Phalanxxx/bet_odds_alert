@@ -136,6 +136,12 @@ def main():
     print(f"[{now.isoformat(timespec='seconds')}] Messi = {prob * 100:.2f}% "
           f"(nguồn: {source}) | ngưỡng {threshold * 100:.0f}%")
 
+    # TEST_MODE: gửi 1 email thử để kiểm tra đường email, KHÔNG đọc/ghi state
+    if os.environ.get("TEST_MODE"):
+        print("** TEST MODE ** gửi email thử nghiệm (bỏ qua state, không lưu).")
+        send_email_resend("cross", prob, threshold)
+        return
+
     state = load_state()
     kind, new_state, changed = decide_alert(prob, threshold, state)
 

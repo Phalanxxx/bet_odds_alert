@@ -61,8 +61,8 @@ Repo → **Settings → Secrets and variables → Actions → New repository sec
 ### 4. Bật & test
 - Tab **Actions** → nếu được hỏi thì bấm **I understand my workflows, enable them**.
 - Chọn workflow **Messi Golden Boot Monitor** → **Run workflow** để chạy tay 1 lần.
-- Xem log ở lần chạy đó: sẽ in tỉ lệ hiện tại. Muốn test luôn email → tạm sửa `ALERT_THRESHOLD`
-  trong file workflow thành `"0.50"`, push, chạy tay, rồi đổi lại `"0.63"`.
+- **Test email:** ở ô **test_threshold** khi bấm Run workflow, nhập `0.50` → gửi 1 email THỬ
+  (chạy chế độ TEST_MODE, không đụng `state.json`). Để trống ô đó = chạy bình thường ở ngưỡng 0.63.
 
 ## Chỉnh sửa
 - **Đổi ngưỡng:** sửa `ALERT_THRESHOLD` trong `.github/workflows/messi-monitor.yml`.

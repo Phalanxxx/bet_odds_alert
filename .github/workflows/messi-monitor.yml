@@ -5,6 +5,11 @@ on:
   schedule:
     - cron: "*/10 * * * *"      # mỗi 10 phút (GitHub có thể trễ vài phút lúc cao điểm)
   workflow_dispatch:            # cho phép bấm chạy tay để test
+    inputs:
+      test_threshold:
+        description: "Ngưỡng test tạm (vd 0.50) -> gửi 1 email THỬ, không đụng state. Để trống = chạy thường (0.63)."
+        required: false
+        default: ""
 
 # tránh 2 lần chạy chồng nhau (dẫn tới xung đột khi commit state.json)
 concurrency:
@@ -32,7 +37,10 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
           ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}   # tùy chọn
-          ALERT_THRESHOLD: "0.63"
+          # Ngưỡng: dùng ô nhập khi chạy tay, mặc định 0.63
+          ALERT_THRESHOLD: ${{ github.event.inputs.test_threshold != '' && github.event.inputs.test_threshold || '0.63' }}
+          # Bật TEST_MODE khi có nhập ngưỡng test -> gửi email thử, bỏ qua state
+          TEST_MODE: ${{ github.event.inputs.test_threshold != '' && '1' || '' }}
         run: python3 messi_cloud_alert.py
 
       - name: Lưu lại state (chống spam) nếu có thay đổi
