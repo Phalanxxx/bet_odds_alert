@@ -1,0 +1,45 @@
+name: Messi Golden Boot Monitor
+
+# Chạy trên cloud của GitHub, không cần treo máy local.
+on:
+  schedule:
+    - cron: "*/10 * * * *"      # mỗi 10 phút (GitHub có thể trễ vài phút lúc cao điểm)
+  workflow_dispatch:            # cho phép bấm chạy tay để test
+
+# tránh 2 lần chạy chồng nhau (dẫn tới xung đột khi commit state.json)
+concurrency:
+  group: messi-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: write               # cần để commit state.json (chống spam email) trở lại repo
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Kiểm tra tỉ lệ & gửi email nếu vượt ngưỡng
+        id: check
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}   # tùy chọn
+          ALERT_THRESHOLD: "0.63"
+        run: python3 messi_cloud_alert.py
+
+      - name: Lưu lại state (chống spam) nếu có thay đổi
+        if: steps.check.outputs.state_changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit -m "chore: update alert state [skip ci]" || echo "không có gì để commit"
+          git push

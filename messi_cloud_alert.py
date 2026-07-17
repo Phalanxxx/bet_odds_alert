@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""
+Kiểm tra 1 lần tỉ lệ Messi thắng World Cup Golden Boot trên Polymarket,
+gửi email qua Resend API nếu tỉ lệ "Yes" >= ngưỡng (mặc định 63%).
+
+Thiết kế để chạy trên GitHub Actions cron (không cần treo máy local).
+Dùng state.json để CHỐNG SPAM: chỉ email khi tỉ lệ VƯỢT ngưỡng lần đầu
+(edge trigger), không email lặp lại khi vẫn đang trên ngưỡng.
+
+Biến môi trường (đặt trong GitHub Secrets):
+    RESEND_API_KEY   - API key của Resend (bắt buộc để gửi thật)
+    ALERT_EMAIL_TO   - email nhận, cách nhau bởi dấu phẩy nếu nhiều
+    ALERT_EMAIL_FROM - (tùy chọn) mặc định "Polymarket Alert <onboarding@resend.dev>"
+    ALERT_THRESHOLD  - (tùy chọn) ngưỡng 0-1, mặc định 0.63
+
+Chạy thử local (không có RESEND_API_KEY -> chế độ DRY-RUN, chỉ in ra):
+    ALERT_EMAIL_TO=you@example.com python3 messi_cloud_alert.py
+"""
+
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+# dùng lại logic fetch & quyết định cảnh báo đã kiểm chứng trong file monitor
+from messi_goldenboot_monitor import (
+    EVENT_SLUG,
+    decide_alert,
+    find_messi_market,
+    get_probability,
+    level_of,
+)
+
+STATE_FILE = os.environ.get("STATE_FILE", "state.json")
+RESEND_ENDPOINT = "https://api.resend.com/emails"
+EVENT_URL = f"https://polymarket.com/event/{EVENT_SLUG}"
+
+
+# --------------------------------------------------------------------------- #
+# State (chống spam email)
+# --------------------------------------------------------------------------- #
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"above": False, "peak_level": 0, "last_alert_iso": None}
+
+
+def save_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+# --------------------------------------------------------------------------- #
+# Email qua Resend
+# --------------------------------------------------------------------------- #
+def _alert_texts(kind, prob, threshold):
+    """Trả (subject, dòng mô tả HTML) theo loại cảnh báo."""
+    p = f"{prob * 100:.1f}%"
+    th = f"{threshold * 100:.0f}%"
+    lvl = level_of(prob)
+    if kind == "cross":
+        return (f"🚨 Messi VƯỢT {th} — hiện {p}",
+                f"Tỉ lệ <b>Messi</b> thắng Golden Boot vừa <b>vượt ngưỡng {th}</b>, hiện <b>{p}</b>.")
+    if kind == "rise":
+        return (f"📈 Messi lập mốc {lvl}% — hiện {p}",
+                f"Tỉ lệ <b>Messi</b> tiếp tục <b>tăng</b>, đạt mốc mới <b>{lvl}%</b> (hiện {p}).")
+    if kind == "drop":
+        return (f"🔻 Messi TỤT xuống dưới {th} — hiện {p}",
+                f"Tỉ lệ <b>Messi</b> vừa <b>tụt xuống dưới {th}</b>, hiện <b>{p}</b>.")
+    return (f"Messi {p}", f"Tỉ lệ Messi hiện <b>{p}</b>.")
+
+
+def send_email_resend(kind, prob, threshold):
+    api_key = os.environ.get("RESEND_API_KEY")
+    to_addr = os.environ.get("ALERT_EMAIL_TO", "")
+    from_addr = os.environ.get("ALERT_EMAIL_FROM", "Polymarket Alert <onboarding@resend.dev>")
+
+    subject, lead = _alert_texts(kind, prob, threshold)
+    html = f"""
+        <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;color:#111">
+          <h2 style="margin:0 0 8px">{subject.split(' — ')[0]}</h2>
+          <p>{lead}</p>
+          <p><a href="{EVENT_URL}" style="color:#2563eb">Mở thị trường trên Polymarket →</a></p>
+          <p style="color:#888;font-size:12px">
+             Thời điểm: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</p>
+        </div>
+    """.strip()
+
+    recipients = [a.strip() for a in to_addr.split(",") if a.strip()]
+
+    if not api_key:
+        print("[DRY-RUN] Chưa có RESEND_API_KEY — email KHÔNG gửi, nội dung dự kiến:")
+        print(f"  From:    {from_addr}")
+        print(f"  To:      {recipients}")
+        print(f"  Subject: {subject}")
+        return
+
+    if not recipients:
+        raise RuntimeError("Thiếu ALERT_EMAIL_TO")
+
+    payload = json.dumps({
+        "from": from_addr,
+        "to": recipients,
+        "subject": subject,
+        "html": html,
+    }).encode("utf-8")
+
+    req = Request(
+        RESEND_ENDPOINT,
+        data=payload,
+        method="POST",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(req, timeout=20) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+        print(f"Đã gửi email tới {recipients} (Resend id: {resp.get('id')})")
+    except HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        raise RuntimeError(f"Resend trả lỗi {e.code}: {body}") from e
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+def main():
+    threshold = float(os.environ.get("ALERT_THRESHOLD", "0.63"))
+
+    market = find_messi_market()
+    prob, source = get_probability(market)
+    now = datetime.now(timezone.utc)
+    print(f"[{now.isoformat(timespec='seconds')}] Messi = {prob * 100:.2f}% "
+          f"(nguồn: {source}) | ngưỡng {threshold * 100:.0f}%")
+
+    state = load_state()
+    kind, new_state, changed = decide_alert(prob, threshold, state)
+
+    if kind:
+        send_email_resend(kind, prob, threshold)
+        new_state["last_alert_iso"] = now.isoformat()
+        reason = {"cross": "vừa vượt ngưỡng", "rise": "lập mốc % mới", "drop": "tụt xuống dưới ngưỡng"}
+        print(f"-> Gửi cảnh báo [{kind}] ({reason.get(kind, '')}).")
+    else:
+        new_state["last_alert_iso"] = state.get("last_alert_iso")
+        print("-> Không có thay đổi đáng báo, bỏ qua.")
+
+    # ghi state (lần đầu tạo file, hoặc khi có thay đổi)
+    if changed or not os.path.exists(STATE_FILE):
+        save_state(new_state)
+
+    # cho workflow biết có cần commit lại state không
+    gh_out = os.environ.get("GITHUB_OUTPUT")
+    if gh_out:
+        with open(gh_out, "a", encoding="utf-8") as f:
+            f.write(f"state_changed={'true' if changed else 'false'}\n")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"Lỗi: {e}", file=sys.stderr)
+        sys.exit(1)
