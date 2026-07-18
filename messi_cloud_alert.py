@@ -46,7 +46,7 @@ def load_state():
         with open(STATE_FILE, encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"above": False, "peak_level": 0, "last_alert_iso": None}
+        return {"above": False, "peak_level": 0, "below_low": False, "last_alert_iso": None}
 
 
 def save_state(state):
@@ -57,10 +57,11 @@ def save_state(state):
 # --------------------------------------------------------------------------- #
 # Email qua Resend
 # --------------------------------------------------------------------------- #
-def _alert_texts(kind, prob, threshold):
+def _alert_texts(kind, prob, threshold, low_threshold=None):
     """Trả (subject, dòng mô tả HTML) theo loại cảnh báo."""
     p = f"{prob * 100:.1f}%"
     th = f"{threshold * 100:.0f}%"
+    lo = f"{(low_threshold or 0) * 100:.0f}%"
     lvl = level_of(prob)
     if kind == "cross":
         return (f"🚨 Messi VƯỢT {th} — hiện {p}",
@@ -69,18 +70,21 @@ def _alert_texts(kind, prob, threshold):
         return (f"📈 Messi lập mốc {lvl}% — hiện {p}",
                 f"Tỉ lệ <b>Messi</b> tiếp tục <b>tăng</b>, đạt mốc mới <b>{lvl}%</b> (hiện {p}).")
     if kind == "drop":
-        return (f"🔻 Messi TỤT xuống dưới {th} — hiện {p}",
-                f"Tỉ lệ <b>Messi</b> vừa <b>tụt xuống dưới {th}</b>, hiện <b>{p}</b>.")
+        return (f"🔻 Messi rớt khỏi mốc {th} — hiện {p}",
+                f"Tỉ lệ <b>Messi</b> vừa <b>rớt khỏi mốc {th}</b>, hiện <b>{p}</b>.")
+    if kind == "fall":
+        return (f"⚠️ Messi TỤT sâu dưới {lo} — hiện {p}",
+                f"Tỉ lệ <b>Messi</b> vừa <b>tụt sâu xuống dưới {lo}</b>, hiện <b>{p}</b>.")
     return (f"Messi {p}", f"Tỉ lệ Messi hiện <b>{p}</b>.")
 
 
-def send_email_resend(kind, prob, threshold):
+def send_email_resend(kind, prob, threshold, low_threshold=None):
     api_key = os.environ.get("RESEND_API_KEY")
     to_addr = os.environ.get("ALERT_EMAIL_TO", "")
     # dùng `or` để secret bị bỏ trống (biến = "") vẫn rơi về mặc định
     from_addr = os.environ.get("ALERT_EMAIL_FROM") or "Polymarket Alert <onboarding@resend.dev>"
 
-    subject, lead = _alert_texts(kind, prob, threshold)
+    subject, lead = _alert_texts(kind, prob, threshold, low_threshold)
     html = f"""
         <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;color:#111">
           <h2 style="margin:0 0 8px">{subject.split(' — ')[0]}</h2>
@@ -136,28 +140,34 @@ def send_email_resend(kind, prob, threshold):
 # Main
 # --------------------------------------------------------------------------- #
 def main():
-    threshold = float(os.environ.get("ALERT_THRESHOLD", "0.63"))
+    threshold = float(os.environ.get("ALERT_THRESHOLD", "0.60"))
+    # ngưỡng dưới: để trống/xóa env -> None -> tắt cảnh báo 'fall'
+    low_raw = os.environ.get("ALERT_LOW_THRESHOLD", "0.57")
+    low_threshold = float(low_raw) if low_raw.strip() else None
 
     market = find_messi_market()
     prob, source = get_probability(market)
     now = datetime.now(timezone.utc)
+    low_txt = f"{low_threshold * 100:.0f}%" if low_threshold is not None else "tắt"
     print(f"[{now.isoformat(timespec='seconds')}] Messi = {prob * 100:.2f}% "
-          f"(nguồn: {source}) | ngưỡng {threshold * 100:.0f}%")
+          f"(nguồn: {source}) | ngưỡng trên {threshold * 100:.0f}% | ngưỡng dưới {low_txt}")
 
     # TEST_MODE: gửi 1 email thử để kiểm tra đường email, KHÔNG đọc/ghi state
     if os.environ.get("TEST_MODE"):
         print("** TEST MODE ** gửi email thử nghiệm (bỏ qua state, không lưu).")
-        send_email_resend("cross", prob, threshold)
+        send_email_resend("cross", prob, threshold, low_threshold)
         return
 
     state = load_state()
-    kind, new_state, changed = decide_alert(prob, threshold, state)
+    kinds, new_state, changed = decide_alert(prob, threshold, state, low_threshold)
 
-    if kind:
-        send_email_resend(kind, prob, threshold)
+    if kinds:
+        reason = {"cross": "vừa vượt ngưỡng trên", "rise": "lập mốc % mới",
+                  "drop": "rớt khỏi ngưỡng trên", "fall": "tụt sâu dưới ngưỡng dưới"}
+        for kind in kinds:
+            send_email_resend(kind, prob, threshold, low_threshold)
+            print(f"-> Gửi cảnh báo [{kind}] ({reason.get(kind, '')}).")
         new_state["last_alert_iso"] = now.isoformat()
-        reason = {"cross": "vừa vượt ngưỡng", "rise": "lập mốc % mới", "drop": "tụt xuống dưới ngưỡng"}
-        print(f"-> Gửi cảnh báo [{kind}] ({reason.get(kind, '')}).")
     else:
         new_state["last_alert_iso"] = state.get("last_alert_iso")
         print("-> Không có thay đổi đáng báo, bỏ qua.")

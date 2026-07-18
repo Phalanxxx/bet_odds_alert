@@ -117,31 +117,46 @@ def level_of(prob):
     return int(prob * 100 + 1e-9)
 
 
-def decide_alert(prob, threshold, state):
+def decide_alert(prob, threshold, state, low_threshold=None):
     """
-    Quyết định cảnh báo theo yêu cầu:
-      - 'cross' : vừa VƯỢT ngưỡng lần đầu
-      - 'rise'  : đang trên ngưỡng và lập MỐC % nguyên mới cao hơn (mỗi +1%)
-      - 'drop'  : vừa TỤT từ trên ngưỡng xuống dưới ngưỡng
-      - None    : không có gì thay đổi
+    Quyết định cảnh báo:
+      - 'cross' : vừa VƯỢT ngưỡng trên lần đầu
+      - 'rise'  : đang trên ngưỡng trên và lập MỐC % nguyên mới cao hơn (mỗi +1%)
+      - 'drop'  : vừa TỤT từ trên ngưỡng trên xuống dưới ngưỡng trên
+      - 'fall'  : vừa TỤT xuống dưới NGƯỠNG DƯỚI (low_threshold), nếu có đặt
 
-    state = {"above": bool, "peak_level": int}
-    Trả (kind|None, new_state, changed_bool).
+    state = {"above": bool, "peak_level": int, "below_low": bool}
+    Trả (kinds_list, new_state, changed_bool). kinds_list có thể rỗng/1/nhiều phần tử
+    (vd nhảy vọt xuyên cả 2 mốc trong 1 lần kiểm tra -> ['drop', 'fall']).
     """
+    above0 = bool(state.get("above", False))
+    peak0 = int(state.get("peak_level", 0))
+    below0 = bool(state.get("below_low", False))
+
+    above, peak, below = above0, peak0, below0
+    kinds = []
+
     hit = prob >= threshold
     level = level_of(prob)
-    above = bool(state.get("above", False))
-    peak = int(state.get("peak_level", 0))
 
-    if hit and not above:                       # 62% -> 63%: vượt ngưỡng
-        return "cross", {"above": True, "peak_level": level}, True
-    if hit and above:
-        if level > peak:                         # 63% -> 64% -> 65%...: mỗi mốc mới
-            return "rise", {"above": True, "peak_level": level}, True
-        return None, {"above": True, "peak_level": peak}, False
-    if not hit and above:                        # 63% -> 62%: tụt xuống dưới
-        return "drop", {"above": False, "peak_level": 0}, True
-    return None, {"above": False, "peak_level": 0}, False
+    # --- Ngưỡng trên ---
+    if hit and not above:                         # vượt ngưỡng trên lần đầu
+        kinds.append("cross"); above = True; peak = level
+    elif hit and above and level > peak:          # lập mốc % mới cao hơn
+        kinds.append("rise"); peak = level
+    elif not hit and above:                       # rớt khỏi ngưỡng trên
+        kinds.append("drop"); above = False; peak = 0
+
+    # --- Ngưỡng dưới (edge trigger, reset khi lên lại >= low_threshold) ---
+    if low_threshold is not None:
+        if prob < low_threshold and not below:
+            kinds.append("fall"); below = True
+        elif prob >= low_threshold and below:
+            below = False
+
+    new_state = {"above": above, "peak_level": peak, "below_low": below}
+    changed = (above, peak, below) != (above0, peak0, below0)
+    return kinds, new_state, changed
 
 
 # --------------------------------------------------------------------------- #
@@ -174,20 +189,23 @@ def notify_slack(message):
         print(f"  (không gửi được Slack: {e})", file=sys.stderr)
 
 
-def alert_message(kind, prob, threshold):
+def alert_message(kind, prob, threshold, low_threshold=None):
     p = f"{prob * 100:.1f}%"
     th = f"{threshold * 100:.0f}%"
+    lo = f"{(low_threshold or 0) * 100:.0f}%"
     if kind == "cross":
         return f"🚨 Messi VƯỢT {th} — hiện {p}"
     if kind == "rise":
         return f"📈 Messi lập mốc mới {level_of(prob)}% — hiện {p}"
     if kind == "drop":
-        return f"🔻 Messi TỤT xuống dưới {th} — hiện {p}"
+        return f"🔻 Messi rớt khỏi mốc {th} — hiện {p}"
+    if kind == "fall":
+        return f"⚠️ Messi TỤT sâu xuống dưới {lo} — hiện {p}"
     return f"Messi {p}"
 
 
-def fire_alert(kind, prob, threshold):
-    body = alert_message(kind, prob, threshold)
+def fire_alert(kind, prob, threshold, low_threshold=None):
+    body = alert_message(kind, prob, threshold, low_threshold)
     print(f"{body}  |  polymarket.com/event/{EVENT_SLUG}")
     notify_macos("Polymarket Alert", body)
     notify_slack(f"{body}  |  polymarket.com/event/{EVENT_SLUG}")
@@ -207,15 +225,19 @@ def check_once(threshold):
 def main():
     parser = argparse.ArgumentParser(description="Theo dõi tỉ lệ Messi thắng Golden Boot trên Polymarket")
     parser.add_argument("--threshold", type=float,
-                        default=float(os.environ.get("ALERT_THRESHOLD", "0.63")),
-                        help="Ngưỡng alert (0-1), mặc định 0.63 = 63%%")
+                        default=float(os.environ.get("ALERT_THRESHOLD", "0.60")),
+                        help="Ngưỡng trên (0-1), mặc định 0.60 = 60%%")
+    parser.add_argument("--low-threshold", type=float,
+                        default=float(os.environ.get("ALERT_LOW_THRESHOLD", "0.57")),
+                        help="Ngưỡng dưới (0-1) -> alert 'fall' khi tụt xuống dưới, mặc định 0.57")
     parser.add_argument("--interval", type=int, default=300,
                         help="Khoảng cách giữa các lần kiểm tra (giây), mặc định 300")
     parser.add_argument("--once", action="store_true",
                         help="Kiểm tra 1 lần rồi thoát (hợp với cron/launchd)")
     args = parser.parse_args()
 
-    print(f"Theo dõi Messi @ Golden Boot | ngưỡng alert = {args.threshold * 100:.0f}%")
+    print(f"Theo dõi Messi @ Golden Boot | ngưỡng trên = {args.threshold * 100:.0f}% "
+          f"| ngưỡng dưới = {args.low_threshold * 100:.0f}%")
 
     if args.once:
         try:
@@ -223,20 +245,22 @@ def main():
             hit = prob >= args.threshold
             if hit:
                 fire_alert("cross", prob, args.threshold)  # --once không giữ state -> báo nếu đang trên ngưỡng
-            sys.exit(10 if hit else 0)  # exit 10 = đang trên ngưỡng
+            elif prob < args.low_threshold:
+                fire_alert("fall", prob, args.threshold, args.low_threshold)
+            sys.exit(10 if hit else 0)  # exit 10 = đang trên ngưỡng trên
         except Exception as e:
             print(f"Lỗi: {e}", file=sys.stderr)
             sys.exit(1)
 
     print(f"Chạy liên tục, poll mỗi {args.interval}s. Nhấn Ctrl+C để dừng.\n")
-    state = {"above": False, "peak_level": 0}
+    state = {"above": False, "peak_level": 0, "below_low": False}
     try:
         while True:
             try:
                 prob = check_once(args.threshold)
-                kind, state, _ = decide_alert(prob, args.threshold, state)
-                if kind:
-                    fire_alert(kind, prob, args.threshold)
+                kinds, state, _ = decide_alert(prob, args.threshold, state, args.low_threshold)
+                for kind in kinds:
+                    fire_alert(kind, prob, args.threshold, args.low_threshold)
             except Exception as e:
                 print(f"Lỗi (sẽ thử lại): {e}", file=sys.stderr)
             time.sleep(args.interval)
