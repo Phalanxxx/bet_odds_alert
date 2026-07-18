@@ -1,6 +1,6 @@
 {
-  "above": true,
-  "peak_level": 62,
-  "below_low": false,
-  "last_alert_iso": "2026-07-18T21:31:39.352086+00:00"
+  "above": false,
+  "peak_level": 0,
+  "below_low": true,
+  "last_alert_iso": "2026-07-18T22:29:05.591018+00:00"
 }
